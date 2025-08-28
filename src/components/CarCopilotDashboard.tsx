@@ -1,958 +1,635 @@
 "use client";
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Mic, 
   MicOff, 
-  Wifi, 
-  WifiOff, 
-  CheckCircle, 
-  XCircle, 
-  AlertTriangle, 
-  Settings, 
-  MapPin, 
-  Navigation, 
-  Car, 
-  Fuel, 
-  Thermometer, 
-  Gauge, 
-  Activity, 
-  Battery, 
-  Shield, 
-  Wrench, 
-  FileText,
-  Share2,
-  Play,
-  Zap,
-  Wind,
-  RotateCcw,
-  ChevronLeft,
-  ChevronRight,
-  Type
+  Send, 
+  MessageCircle,
+  Volume2,
+  VolumeX,
+  Sparkles,
+  Brain,
+  Zap
 } from 'lucide-react';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
-import { Progress } from '@/components/ui/progress';
-import { Separator } from '@/components/ui/separator';
+import { Switch } from '@/components/ui/switch';
 import { toast } from 'sonner';
 
-interface VehicleData {
-  rpm: number;
-  speed: number;
-  coolantTemp: number;
-  throttlePosition: number;
-  fuelFlow: number;
-  engineLoad: number;
+// Voice recognition types
+interface SpeechRecognitionEvent extends Event {
+  results: SpeechRecognitionResultList;
+  resultIndex: number;
 }
 
-interface DiagnosticAlert {
+interface SpeechRecognitionErrorEvent extends Event {
+  error: string;
+  message: string;
+}
+
+interface SpeechRecognition extends EventTarget {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  start(): void;
+  stop(): void;
+  abort(): void;
+  onstart: ((this: SpeechRecognition, ev: Event) => any) | null;
+  onresult: ((this: SpeechRecognition, ev: SpeechRecognitionEvent) => any) | null;
+  onerror: ((this: SpeechRecognition, ev: SpeechRecognitionErrorEvent) => any) | null;
+  onend: ((this: SpeechRecognition, ev: Event) => any) | null;
+}
+
+declare global {
+  interface Window {
+    SpeechRecognition: new () => SpeechRecognition;
+    webkitSpeechRecognition: new () => SpeechRecognition;
+  }
+}
+
+type VoiceState = 'idle' | 'listening' | 'processing' | 'speaking';
+
+interface ChatMessage {
   id: string;
-  severity: 'healthy' | 'warning' | 'critical';
-  title: string;
-  description: string;
-  value?: string;
-  threshold?: string;
+  type: 'user' | 'assistant';
+  text: string;
+  timestamp: Date;
 }
 
-interface TripData {
-  distance: number;
-  averageSpeed: number;
-  maxRpm: number;
-  maxSpeed: number;
-  fuelConsumption: number;
-  ecoScore: number;
-  startTime: string;
-  duration: string;
-}
-
-type DashboardSection = 'voice' | 'telemetry' | 'navigation' | 'diagnostics' | 'trip';
-
-export const CarCoPilotDashboard = () => {
-  const [currentSection, setCurrentSection] = useState<DashboardSection>('voice');
-  const [isListening, setIsListening] = useState(false);
-  const [voiceState, setVoiceState] = useState<'idle' | 'listening' | 'processing'>('idle');
-  const [textInput, setTextInput] = useState('');
-  const [speechText, setSpeechText] = useState('');
+export function CarCoPilotDashboard() {
+  // Voice assistant state - Always listening by default
+  const [voiceState, setVoiceState] = useState<VoiceState>('idle');
+  const [transcript, setTranscript] = useState('');
   const [interimTranscript, setInterimTranscript] = useState('');
-  const [lastCommand, setLastCommand] = useState('');
-  const [speechSupported, setSpeechSupported] = useState(false);
-  
+  const [isAlwaysListening, setIsAlwaysListening] = useState(true); // Always on by default
+  const [isMuted, setIsMuted] = useState(false);
+  const [showChat, setShowChat] = useState(false);
+  const [textInput, setTextInput] = useState('');
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
+    {
+      id: 'welcome',
+      type: 'assistant',
+      text: 'Hello! I\'m your AI voice assistant. I\'m always listening and ready to help you with anything you need.',
+      timestamp: new Date()
+    }
+  ]);
+
+  // Voice recognition refs
   const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const synthRef = useRef<SpeechSynthesis | null>(null);
+  const restartTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  const [vehicleData, setVehicleData] = useState<VehicleData>({
-    rpm: 2150,
-    speed: 65,
-    coolantTemp: 88,
-    throttlePosition: 45,
-    fuelFlow: 2.3,
-    engineLoad: 42
-  });
-
-  const [obdStatus] = useState({
-    connected: true,
-    dongleName: 'ELM327 Pro',
-    pollingRate: '10Hz',
-    latency: '23ms'
-  });
-
-  const [gpsStatus] = useState({
-    active: true,
-    type: 'Active USB',
-    accuracy: '3.2m'
-  });
-
-  const [networkStatus] = useState({
-    online: true,
-    strength: 4
-  });
-
-  const [carInfo] = useState({
-    vin: 'WVWZZZ1JZ***6789',
-    model: '2021 Volkswagen Golf GTI',
-    tripStart: '14:23',
-    duration: '1h 42m'
-  });
-
-  const [diagnosticAlerts] = useState<DiagnosticAlert[]>([
-    {
-      id: '1',
-      severity: 'healthy',
-      title: 'Engine Systems',
-      description: 'All systems operating normally'
-    },
-    {
-      id: '2',
-      severity: 'warning',
-      title: 'Coolant Temperature',
-      description: 'Running warm but within acceptable range',
-      value: '88°C',
-      threshold: '105°C'
-    },
-    {
-      id: '3',
-      severity: 'healthy',
-      title: 'Transmission',
-      description: 'Smooth shifting detected'
-    }
-  ]);
-
-  const [tripData] = useState<TripData>({
-    distance: 87.3,
-    averageSpeed: 52,
-    maxRpm: 4200,
-    maxSpeed: 78,
-    fuelConsumption: 7.2,
-    ecoScore: 72,
-    startTime: '14:23',
-    duration: '1h 42m'
-  });
-
-  const [insights] = useState([
-    {
-      icon: '🚦',
-      title: 'Driving Style',
-      description: 'Smooth acceleration detected. Great for fuel economy!'
-    },
-    {
-      icon: '🌦️',
-      title: 'Weather Alert',
-      description: 'Rain expected in 15km. Reduce speed accordingly.'
-    },
-    {
-      icon: '🔋',
-      title: 'Maintenance',
-      description: 'Oil change due in 2,100km'
-    }
-  ]);
-
-  const sections: { key: DashboardSection; title: string; icon: any }[] = [
-    { key: 'voice', title: 'Voice Assistant', icon: Mic },
-    { key: 'telemetry', title: 'Telemetry', icon: Gauge },
-    { key: 'navigation', title: 'Navigation', icon: Navigation },
-    { key: 'diagnostics', title: 'Diagnostics', icon: Shield },
-    { key: 'trip', title: 'Trip Summary', icon: Car }
-  ];
-
+  // Initialize speech recognition with always-on capability
   useEffect(() => {
     if (typeof window !== 'undefined') {
-      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      synthRef.current = window.speechSynthesis;
       
       if (SpeechRecognition) {
-        setSpeechSupported(true);
-        const recognition = new SpeechRecognition();
+        recognitionRef.current = new SpeechRecognition();
+        const recognition = recognitionRef.current;
         
         recognition.continuous = true;
         recognition.interimResults = true;
         recognition.lang = 'en-US';
-        recognition.maxAlternatives = 1;
-
+        
         recognition.onstart = () => {
-          console.log('Speech recognition started');
-          setIsListening(true);
           setVoiceState('listening');
-          setSpeechText('');
-          setInterimTranscript('');
         };
-
+        
         recognition.onresult = (event: SpeechRecognitionEvent) => {
-          let interimTranscript = '';
-          let finalTranscript = '';
-
+          let interim = '';
+          let final = '';
+          
           for (let i = event.resultIndex; i < event.results.length; i++) {
             const transcript = event.results[i][0].transcript;
             if (event.results[i].isFinal) {
-              finalTranscript += transcript;
+              final += transcript;
             } else {
-              interimTranscript += transcript;
+              interim += transcript;
             }
           }
-
-          setInterimTranscript(interimTranscript);
           
-          if (finalTranscript) {
-            setSpeechText(finalTranscript.trim());
-            setVoiceState('processing');
-            
-            setTimeout(() => {
-              setLastCommand(finalTranscript.trim());
-              setVoiceState('idle');
-              setIsListening(false);
-              setSpeechText('');
-              setInterimTranscript('');
-              
-              handleVoiceCommand(finalTranscript.trim());
-            }, 2000);
+          if (final) {
+            setTranscript(final);
+            setInterimTranscript('');
+            handleVoiceCommand(final);
+          } else {
+            setInterimTranscript(interim);
           }
         };
-
+        
         recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
           console.error('Speech recognition error:', event.error);
-          setVoiceState('idle');
-          setIsListening(false);
-          setSpeechText('');
+          
+          // Don't show error toasts for common issues when always listening
+          if (event.error !== 'no-speech' && event.error !== 'aborted') {
+            switch (event.error) {
+              case 'not-allowed':
+                toast.error('Microphone access denied. Please allow microphone permissions.');
+                setIsAlwaysListening(false);
+                break;
+              case 'audio-capture':
+                toast.error('No microphone was found. Please connect a microphone.');
+                setIsAlwaysListening(false);
+                break;
+              case 'network':
+                toast.error('Network error occurred during speech recognition.');
+                break;
+            }
+          }
+          
+          // Restart recognition if always listening is enabled
+          if (isAlwaysListening && event.error !== 'not-allowed' && event.error !== 'audio-capture') {
+            restartRecognition();
+          }
+        };
+        
+        recognition.onend = () => {
+          if (voiceState !== 'speaking') {
+            setVoiceState('idle');
+          }
           setInterimTranscript('');
           
-          let errorMessage = 'Voice recognition error';
-          switch (event.error) {
-            case 'not-allowed':
-              errorMessage = 'Microphone access denied. Please allow microphone permissions.';
-              break;
-            case 'no-speech':
-              errorMessage = 'No speech detected. Please try again.';
-              break;
-            case 'audio-capture':
-              errorMessage = 'No microphone found. Please check your audio settings.';
-              break;
-            case 'network':
-              errorMessage = 'Network error. Please check your connection.';
-              break;
-            default:
-              errorMessage = `Speech recognition error: ${event.error}`;
-          }
-          
-          toast.error(errorMessage);
-        };
-
-        recognition.onend = () => {
-          console.log('Speech recognition ended');
-          if (voiceState === 'listening') {
-            setVoiceState('idle');
-            setIsListening(false);
+          // Automatically restart if always listening is enabled
+          if (isAlwaysListening) {
+            restartRecognition();
           }
         };
-
-        recognitionRef.current = recognition;
+        
+        // Start listening immediately
+        startListening();
       } else {
-        setSpeechSupported(false);
-        console.warn('SpeechRecognition not supported');
+        toast.error('Speech recognition is not supported in this browser.');
+        setIsAlwaysListening(false);
       }
     }
 
     return () => {
-      if (recognitionRef.current) {
-        recognitionRef.current.stop();
+      if (restartTimeoutRef.current) {
+        clearTimeout(restartTimeoutRef.current);
       }
     };
-  }, []);
+  }, [isAlwaysListening]);
 
-  const handleVoiceCommand = useCallback((command: string) => {
-    console.log('Processing voice command:', command);
+  // Restart recognition with a small delay
+  const restartRecognition = () => {
+    if (restartTimeoutRef.current) {
+      clearTimeout(restartTimeoutRef.current);
+    }
     
-    const lowerCommand = command.toLowerCase();
-    
-    if (lowerCommand.includes('telemetry') || lowerCommand.includes('engine') || lowerCommand.includes('performance')) {
-      setCurrentSection('telemetry');
-      toast.success('Showing telemetry data');
-    } else if (lowerCommand.includes('navigation') || lowerCommand.includes('navigate') || lowerCommand.includes('route')) {
-      setCurrentSection('navigation');
-      toast.success('Opening navigation');
-    } else if (lowerCommand.includes('diagnostic') || lowerCommand.includes('health') || lowerCommand.includes('check')) {
-      setCurrentSection('diagnostics');
-      toast.success('Running diagnostics');
-    } else if (lowerCommand.includes('trip') || lowerCommand.includes('summary') || lowerCommand.includes('journey')) {
-      setCurrentSection('trip');
-      toast.success('Showing trip summary');
-    } else {
-      toast.success(`Command received: "${command}"`);
-    }
-  }, []);
-
-  const handleVoiceToggle = useCallback(() => {
-    if (!speechSupported) {
-      toast.error('Speech recognition is not supported in your browser. Please use Chrome, Edge, or Safari.');
-      return;
-    }
-
-    if (!recognitionRef.current) {
-      toast.error('Speech recognition not initialized');
-      return;
-    }
-
-    if (voiceState === 'idle') {
-      try {
-        recognitionRef.current.start();
-      } catch (error) {
-        console.error('Error starting speech recognition:', error);
-        toast.error('Failed to start voice recognition. Please try again.');
+    restartTimeoutRef.current = setTimeout(() => {
+      if (isAlwaysListening && recognitionRef.current) {
+        try {
+          recognitionRef.current.start();
+        } catch (error) {
+          console.log('Recognition restart attempted while already running');
+        }
       }
-    } else if (voiceState === 'listening') {
+    }, 1000);
+  };
+
+  // Start listening
+  const startListening = () => {
+    if (!recognitionRef.current) return;
+    
+    try {
+      recognitionRef.current.start();
+    } catch (error) {
+      console.log('Recognition already running or failed to start');
+    }
+  };
+
+  // Stop listening
+  const stopListening = () => {
+    if (recognitionRef.current) {
       recognitionRef.current.stop();
     }
-  }, [voiceState, speechSupported]);
+    if (restartTimeoutRef.current) {
+      clearTimeout(restartTimeoutRef.current);
+    }
+  };
 
-  const handleTextSubmit = useCallback((e: React.FormEvent) => {
-    e.preventDefault();
-    if (!textInput.trim()) return;
+  // Toggle always listening mode
+  const toggleAlwaysListening = () => {
+    const newState = !isAlwaysListening;
+    setIsAlwaysListening(newState);
     
-    handleVoiceCommand(textInput);
-    setLastCommand(textInput);
-    setTextInput('');
-  }, [textInput, handleVoiceCommand]);
-
-  const navigateSection = (direction: 'left' | 'right') => {
-    const currentIndex = sections.findIndex(s => s.key === currentSection);
-    let newIndex;
-    
-    if (direction === 'left') {
-      newIndex = currentIndex < sections.length - 1 ? currentIndex + 1 : 0;
+    if (newState) {
+      startListening();
+      toast.success('Always listening enabled');
     } else {
-      newIndex = currentIndex > 0 ? currentIndex - 1 : sections.length - 1;
+      stopListening();
+      setVoiceState('idle');
+      toast.info('Always listening disabled');
     }
+  };
+
+  // Voice command handler with AI-like responses
+  const handleVoiceCommand = useCallback((command: string) => {
+    setVoiceState('processing');
     
-    setCurrentSection(sections[newIndex].key);
-  };
+    // Add user message to chat
+    const userMessage: ChatMessage = {
+      id: Date.now().toString() + '-user',
+      type: 'user',
+      text: command,
+      timestamp: new Date()
+    };
+    setChatMessages(prev => [...prev, userMessage]);
+    
+    // Process command with AI-like intelligence
+    setTimeout(() => {
+      let response = '';
+      const lowerCommand = command.toLowerCase();
+      
+      // AI-like natural language processing
+      if (lowerCommand.includes('hello') || lowerCommand.includes('hi')) {
+        response = 'Hello! I\'m here and ready to assist you. What can I help you with today?';
+      } else if (lowerCommand.includes('how are you')) {
+        response = 'I\'m functioning perfectly and ready to help! My systems are all green and I\'m listening attentively.';
+      } else if (lowerCommand.includes('what can you do')) {
+        response = 'I can help you with various tasks, answer questions, provide information, and have natural conversations. Just speak naturally and I\'ll understand!';
+      } else if (lowerCommand.includes('weather')) {
+        response = 'I\'d love to help with weather information! Currently, I can provide general assistance. For real-time weather, I\'d need to connect to weather services.';
+      } else if (lowerCommand.includes('time')) {
+        const now = new Date();
+        response = `The current time is ${now.toLocaleTimeString()}. Is there anything else you\'d like to know?`;
+      } else if (lowerCommand.includes('date')) {
+        const now = new Date();
+        response = `Today is ${now.toLocaleDateString()}. How else can I assist you?`;
+      } else if (lowerCommand.includes('thank')) {
+        response = 'You\'re very welcome! I\'m always happy to help. Is there anything else you need?';
+      } else if (lowerCommand.includes('music') || lowerCommand.includes('play')) {
+        response = 'I understand you\'d like to control music. I can help coordinate with your vehicle\'s audio system when connected.';
+      } else if (lowerCommand.includes('navigate') || lowerCommand.includes('directions')) {
+        response = 'I can assist with navigation requests. I\'d work with your vehicle\'s GPS system to provide turn-by-turn directions.';
+      } else if (lowerCommand.includes('call') || lowerCommand.includes('phone')) {
+        response = 'I can help manage phone calls through your vehicle\'s hands-free system when available.';
+      } else if (lowerCommand.includes('stop listening') || lowerCommand.includes('mute')) {
+        response = 'I\'ll reduce my responsiveness. You can tap the microphone button to re-enable full listening mode.';
+        setIsAlwaysListening(false);
+      } else {
+        response = `I heard you say: "${command}". I'm continuously learning and improving. How can I help you better understand or accomplish what you need?`;
+      }
+      
+      // Add assistant response
+      const assistantMessage: ChatMessage = {
+        id: Date.now().toString() + '-assistant',
+        type: 'assistant',
+        text: response,
+        timestamp: new Date()
+      };
+      setChatMessages(prev => [...prev, assistantMessage]);
+      
+      // Speak response if not muted
+      if (!isMuted && synthRef.current) {
+        const utterance = new SpeechSynthesisUtterance(response);
+        utterance.rate = 0.9;
+        utterance.pitch = 1.1;
+        utterance.onstart = () => setVoiceState('speaking');
+        utterance.onend = () => setVoiceState(isAlwaysListening ? 'listening' : 'idle');
+        synthRef.current.speak(utterance);
+      } else {
+        setVoiceState(isAlwaysListening ? 'listening' : 'idle');
+      }
+    }, 1500);
+  }, [isMuted, isAlwaysListening]);
 
-  const getGaugeColor = (value: number, type: string) => {
-    switch (type) {
-      case 'rpm':
-        return value > 6000 ? '#ef4444' : value > 4000 ? '#f59e0b' : '#22c55e';
-      case 'temp':
-        return value > 100 ? '#ef4444' : value > 95 ? '#f59e0b' : '#22c55e';
-      case 'throttle':
-        return value > 80 ? '#f59e0b' : '#22c55e';
-      default:
-        return '#22c55e';
+  // Text input handler
+  const handleTextSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (textInput.trim()) {
+      handleVoiceCommand(textInput.trim());
+      setTextInput('');
     }
   };
 
-  const CircularGauge = ({ value, max, title, unit, type }: {
-    value: number;
-    max: number;
-    title: string;
-    unit: string;
-    type: string;
-  }) => {
-    const percentage = (value / max) * 100;
-    const strokeDasharray = 2 * Math.PI * 45;
-    const strokeDashoffset = strokeDasharray - (strokeDasharray * percentage) / 100;
-    const color = getGaugeColor(value, type);
-
-    return (
-      <div className="relative w-32 h-32">
-        <svg className="w-full h-full transform -rotate-90" viewBox="0 0 100 100">
-          <circle
-            cx="50"
-            cy="50"
-            r="45"
-            stroke="currentColor"
-            strokeWidth="8"
-            fill="none"
-            className="text-muted"
-          />
-          <motion.circle
-            cx="50"
-            cy="50"
-            r="45"
-            stroke={color}
-            strokeWidth="8"
-            fill="none"
-            strokeLinecap="round"
-            strokeDasharray={strokeDasharray}
-            strokeDashoffset={strokeDashoffset}
-            initial={{ strokeDashoffset: strokeDasharray }}
-            animate={{ strokeDashoffset }}
-            transition={{ duration: 0.5, ease: "easeOut" }}
-            className="drop-shadow-lg"
-            style={{
-              filter: `drop-shadow(0 0 6px ${color}40)`
-            }}
-          />
-        </svg>
-        <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
-          <div className="text-xl font-bold text-foreground">{Math.round(value)}</div>
-          <div className="text-xs text-muted-foreground">{unit}</div>
-        </div>
-        <div className="absolute -bottom-2 left-1/2 transform -translate-x-1/2 text-xs font-medium text-center">
-          {title}
-        </div>
-      </div>
-    );
-  };
-
-  const VoiceSection = () => (
-    <div className="flex flex-col items-center justify-center min-h-[70vh] space-y-8">
-      {!speechSupported && (
+  // Siri-style waveform animation with signature colors
+  const SiriWaveform = ({ isActive, intensity = 1 }: { isActive: boolean; intensity?: number }) => (
+    <div className="flex items-center justify-center space-x-1 h-16 w-full max-w-md">
+      {Array.from({ length: 32 }).map((_, i) => (
         <motion.div
-          initial={{ opacity: 0, y: -20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="w-full max-w-2xl"
-        >
-          <Card className="bg-yellow-500/10 border-yellow-500/30">
-            <CardContent className="p-4">
-              <div className="flex items-center space-x-2">
-                <AlertTriangle className="w-5 h-5 text-yellow-500" />
-                <span className="text-yellow-400 font-medium">
-                  Voice recognition requires Chrome, Edge, or Safari browser
-                </span>
-              </div>
-            </CardContent>
-          </Card>
-        </motion.div>
-      )}
+          key={i}
+          className="w-1 rounded-full"
+          style={{
+            background: isActive 
+              ? `linear-gradient(to top, 
+                  #007AFF 0%, 
+                  #00D4FF 30%, 
+                  #5AC8FA 60%, 
+                  #AF52DE 100%)`
+              : 'rgba(120, 120, 128, 0.3)'
+          }}
+          animate={{
+            height: isActive 
+              ? [
+                  6, 
+                  Math.sin((i * 0.5) + Date.now() * 0.005) * 25 * intensity + 20, 
+                  6
+                ] 
+              : 6,
+            opacity: isActive ? [0.6, 1, 0.6] : 0.4
+          }}
+          transition={{
+            duration: 0.8 + Math.random() * 0.4,
+            repeat: Infinity,
+            delay: i * 0.03,
+            ease: [0.25, 0.1, 0.25, 1]
+          }}
+        />
+      ))}
+    </div>
+  );
 
-      <motion.div
-        className="relative w-48 h-48 rounded-full flex items-center justify-center cursor-pointer"
-        animate={{
-          scale: isListening ? [1, 1.05, 1] : 1,
-          boxShadow: isListening 
-            ? [
-                '0 0 0 0 rgba(59, 130, 246, 0.7)',
-                '0 0 0 40px rgba(59, 130, 246, 0)',
-                '0 0 0 0 rgba(59, 130, 246, 0)'
-              ]
-            : '0 0 0 0 rgba(59, 130, 246, 0)'
-        }}
-        transition={{
-          duration: 1.5,
-          repeat: isListening ? Infinity : 0,
-          ease: "easeInOut"
-        }}
-        onClick={handleVoiceToggle}
-        style={{
-          background: isListening 
-            ? 'linear-gradient(135deg, #3b82f6, #06b6d4)' 
-            : speechSupported
-              ? 'linear-gradient(135deg, #374151, #4b5563)'
-              : 'linear-gradient(135deg, #6b7280, #9ca3af)'
-        }}
-      >
-        {voiceState === 'listening' ? (
-          <Mic className="w-20 h-20 text-white" />
-        ) : voiceState === 'processing' ? (
-          <motion.div
-            animate={{ rotate: 360 }}
-            transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
-          >
-            <RotateCcw className="w-20 h-20 text-white" />
-          </motion.div>
-        ) : (
-          <MicOff className="w-20 h-20 text-white" />
-        )}
-      </motion.div>
-
+  // Animated orb with Siri-style colors
+  const VoiceOrb = () => (
+    <div className="relative flex items-center justify-center">
+      {/* Outer pulse rings with Siri colors */}
       <AnimatePresence>
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -20 }}
-          className="text-center"
-        >
-          <div className="text-2xl font-bold mb-2">
-            {voiceState === 'idle' && (speechSupported ? 'Hey, I\'m your Co-Pilot' : 'Voice Assistant Unavailable')}
-            {voiceState === 'listening' && 'Listening...'}
-            {voiceState === 'processing' && 'Processing...'}
-          </div>
-          <div className="text-muted-foreground">
-            {voiceState === 'idle' && (speechSupported ? 'Tap to speak or type below' : 'Please use text input below')}
-            {voiceState === 'listening' && 'Speak your command'}
-            {voiceState === 'processing' && 'Understanding your request'}
-          </div>
-        </motion.div>
-      </AnimatePresence>
-
-      <AnimatePresence>
-        {(speechText || interimTranscript) && (
-          <motion.div
-            initial={{ opacity: 0, scale: 0.9 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.9 }}
-            className="w-full max-w-2xl"
-          >
-            <Card className="bg-card/90 backdrop-blur-sm border-blue-500/30">
-              <CardContent className="p-6">
-                <div className="flex items-start space-x-3">
-                  <Type className="w-5 h-5 text-blue-500 mt-1 flex-shrink-0" />
-                  <div className="flex-1">
-                    <div className="text-sm text-muted-foreground mb-2">Speech to Text:</div>
-                    <div className="text-lg font-medium min-h-[1.5rem]">
-                      <span className="text-blue-400">{speechText}</span>
-                      <span className="text-blue-300/70 italic">{interimTranscript}</span>
-                      {(voiceState === 'listening' || interimTranscript) && (
-                        <motion.span
-                          animate={{ opacity: [1, 0] }}
-                          transition={{ duration: 0.8, repeat: Infinity }}
-                          className="inline-block w-0.5 h-6 bg-blue-500 ml-1"
-                        />
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {lastCommand && (
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="w-full max-w-2xl"
-        >
-          <Card className="bg-green-500/10 border-green-500/30">
-            <CardContent className="p-4">
-              <div className="flex items-center space-x-2">
-                <CheckCircle className="w-4 h-4 text-green-500" />
-                <span className="text-sm text-muted-foreground">Last Command:</span>
-                <span className="text-green-400 font-medium">{lastCommand}</span>
-              </div>
-            </CardContent>
-          </Card>
-        </motion.div>
-      )}
-
-      <form onSubmit={handleTextSubmit} className="w-full max-w-2xl">
-        <div className="flex gap-2">
-          <Input
-            placeholder="Or type your command here..."
-            value={textInput}
-            onChange={(e) => setTextInput(e.target.value)}
-            className="h-14 text-lg bg-background/50 border-blue-500/30 focus:border-blue-500 focus:ring-blue-500/20"
-            style={{
-              boxShadow: textInput ? '0 0 0 1px rgba(59, 130, 246, 0.3)' : 'none'
-            }}
-          />
-          <Button type="submit" disabled={!textInput.trim()} className="h-14 px-6">
-            Send
-          </Button>
-        </div>
-      </form>
-
-      {voiceState === 'listening' && (
-        <div className="flex items-center justify-center space-x-2">
-          {[...Array(12)].map((_, i) => (
+        {(voiceState === 'listening' || voiceState === 'processing') && (
+          <>
             <motion.div
-              key={i}
-              className="w-1 bg-blue-500 rounded-full"
-              animate={{
-                height: [8, 24, 8],
-                opacity: [0.4, 1, 0.4]
+              className="absolute w-80 h-80 rounded-full border-2"
+              style={{ 
+                borderColor: voiceState === 'listening' 
+                  ? 'rgba(0, 122, 255, 0.3)' 
+                  : 'rgba(175, 82, 222, 0.3)' 
               }}
-              transition={{
-                duration: 0.8,
-                repeat: Infinity,
-                delay: i * 0.1,
-                ease: "easeInOut"
+              initial={{ scale: 0.8, opacity: 0.8 }}
+              animate={{ 
+                scale: [0.8, 1.5, 0.8], 
+                opacity: [0.8, 0.1, 0.8] 
+              }}
+              exit={{ scale: 0.8, opacity: 0 }}
+              transition={{ 
+                duration: 3, 
+                repeat: Infinity, 
+                ease: "easeInOut" 
               }}
             />
-          ))}
-        </div>
-      )}
+            <motion.div
+              className="absolute w-64 h-64 rounded-full border-2"
+              style={{ 
+                borderColor: voiceState === 'listening' 
+                  ? 'rgba(90, 200, 250, 0.4)' 
+                  : 'rgba(0, 212, 255, 0.4)' 
+              }}
+              initial={{ scale: 0.9, opacity: 0.6 }}
+              animate={{ 
+                scale: [0.9, 1.3, 0.9], 
+                opacity: [0.6, 0.2, 0.6] 
+              }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              transition={{ 
+                duration: 2.5, 
+                repeat: Infinity, 
+                ease: "easeInOut",
+                delay: 0.8 
+              }}
+            />
+          </>
+        )}
+      </AnimatePresence>
 
-      <div className="w-full max-w-2xl">
-        <Card className="bg-card/50 backdrop-blur-sm">
-          <CardContent className="p-4">
-            <div className="text-sm text-muted-foreground mb-2">Try saying:</div>
-            <div className="grid grid-cols-2 gap-2 text-sm">
-              <div>"Show telemetry"</div>
-              <div>"Open navigation"</div>
-              <div>"Check diagnostics"</div>
-              <div>"Show trip summary"</div>
+      {/* Main orb with Siri colors */}
+      <motion.div
+        className="relative w-48 h-48 rounded-full cursor-pointer overflow-hidden"
+        whileHover={{ scale: 1.05 }}
+        whileTap={{ scale: 0.95 }}
+        animate={voiceState === 'processing' ? { 
+          rotate: 360,
+        } : {}}
+        transition={voiceState === 'processing' ? { 
+          rotate: { duration: 3, repeat: Infinity, ease: "linear" }
+        } : {}}
+        style={{
+          background: voiceState === 'speaking' 
+            ? 'linear-gradient(135deg, #34C759, #007AFF, #5AC8FA)'
+            : voiceState === 'processing'
+            ? 'linear-gradient(135deg, #AF52DE, #007AFF, #00D4FF)'
+            : voiceState === 'listening'
+            ? 'linear-gradient(135deg, #007AFF, #5AC8FA, #00D4FF)'
+            : 'linear-gradient(135deg, #8E8E93, #636366, #48484A)',
+          boxShadow: `0 25px 80px ${
+            voiceState === 'speaking' ? 'rgba(52, 199, 89, 0.5)' :
+            voiceState === 'processing' ? 'rgba(175, 82, 222, 0.5)' :
+            voiceState === 'listening' ? 'rgba(0, 122, 255, 0.5)' :
+            'rgba(72, 72, 74, 0.3)'
+          }`
+        }}
+      >
+        {/* Inner glow */}
+        <div className="absolute inset-3 rounded-full bg-gradient-to-br from-white/30 to-transparent" />
+        
+        {/* Center content */}
+        <div className="absolute inset-0 flex flex-col items-center justify-center">
+          {voiceState === 'speaking' ? (
+            <SiriWaveform isActive={true} intensity={1.8} />
+          ) : voiceState === 'processing' ? (
+            <motion.div
+              animate={{ scale: [1, 1.2, 1], rotate: [0, 180, 360] }}
+              transition={{ duration: 2, repeat: Infinity }}
+            >
+              <Brain className="w-12 h-12 text-white" />
+            </motion.div>
+          ) : voiceState === 'listening' ? (
+            <div className="flex flex-col items-center">
+              <motion.div
+                animate={{ scale: [1, 1.1, 1] }}
+                transition={{ duration: 2, repeat: Infinity }}
+              >
+                <Mic className="w-12 h-12 text-white mb-2" />
+              </motion.div>
+              <SiriWaveform isActive={true} intensity={1.2} />
             </div>
-          </CardContent>
-        </Card>
-      </div>
+          ) : (
+            <Sparkles className="w-12 h-12 text-white/90" />
+          )}
+        </div>
+      </motion.div>
     </div>
   );
-
-  const TelemetrySection = () => (
-    <div className="space-y-6">
-      <div className="text-center mb-8">
-        <h2 className="text-3xl font-bold mb-2">Live Telemetry</h2>
-        <p className="text-muted-foreground">Real-time vehicle performance data</p>
-      </div>
-      
-      <div className="grid grid-cols-2 gap-8 mb-6">
-        <div className="flex justify-center">
-          <CircularGauge
-            value={vehicleData.rpm}
-            max={8000}
-            title="Engine RPM"
-            unit="RPM"
-            type="rpm"
-          />
-        </div>
-        <div className="flex justify-center">
-          <CircularGauge
-            value={vehicleData.speed}
-            max={240}
-            title="Speed"
-            unit="km/h"
-            type="speed"
-          />
-        </div>
-        <div className="flex justify-center">
-          <CircularGauge
-            value={vehicleData.coolantTemp}
-            max={120}
-            title="Coolant Temp"
-            unit="°C"
-            type="temp"
-          />
-        </div>
-        <div className="flex justify-center">
-          <CircularGauge
-            value={vehicleData.throttlePosition}
-            max={100}
-            title="Throttle"
-            unit="%"
-            type="throttle"
-          />
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 gap-4">
-        <Card className="bg-card/80 backdrop-blur-sm">
-          <CardContent className="p-4">
-            <div className="flex items-center space-x-2 mb-2">
-              <Fuel className="w-5 h-5 text-blue-500" />
-              <span className="font-medium">Fuel Flow</span>
-            </div>
-            <div className="text-3xl font-bold">{vehicleData.fuelFlow.toFixed(1)}</div>
-            <div className="text-sm text-muted-foreground">L/h</div>
-          </CardContent>
-        </Card>
-        <Card className="bg-card/80 backdrop-blur-sm">
-          <CardContent className="p-4">
-            <div className="flex items-center space-x-2 mb-2">
-              <Activity className="w-5 h-5 text-orange-500" />
-              <span className="font-medium">Engine Load</span>
-            </div>
-            <div className="text-3xl font-bold">{Math.round(vehicleData.engineLoad)}</div>
-            <div className="text-sm text-muted-foreground">%</div>
-          </CardContent>
-        </Card>
-      </div>
-    </div>
-  );
-
-  const NavigationSection = () => (
-    <div className="space-y-6">
-      <div className="text-center mb-8">
-        <h2 className="text-3xl font-bold mb-2">Navigation</h2>
-        <p className="text-muted-foreground">Route guidance and location services</p>
-      </div>
-
-      <div className="aspect-video bg-background/30 rounded-xl flex items-center justify-center relative overflow-hidden mb-6">
-        <div className="absolute inset-0 bg-gradient-to-br from-blue-500/20 to-green-500/20" />
-        <div className="text-center z-10">
-          <MapPin className="w-16 h-16 text-primary mx-auto mb-4" />
-          <div className="text-xl font-bold mb-2">Current Location</div>
-          <div className="text-muted-foreground">Highway A1, Exit 23</div>
-        </div>
-      </div>
-
-      <Card className="bg-card/80 backdrop-blur-sm">
-        <CardContent className="p-6 space-y-4">
-          <div className="flex items-center justify-between">
-            <span className="font-medium">Next Turn:</span>
-            <Badge variant="secondary" className="text-lg px-3 py-1">2.3 km</Badge>
-          </div>
-          <div className="flex items-center space-x-3">
-            <Navigation className="w-6 h-6 text-blue-500" />
-            <span className="text-lg">Turn right onto B-road 245</span>
-          </div>
-        </CardContent>
-      </Card>
-
-      <div className="grid grid-cols-2 gap-4">
-        <Button className="h-16 flex-col space-y-2">
-          <MapPin className="w-6 h-6" />
-          <span>Find Stations</span>
-        </Button>
-        <Button variant="outline" className="h-16 flex-col space-y-2">
-          <Wind className="w-6 h-6" />
-          <span>Traffic</span>
-        </Button>
-      </div>
-    </div>
-  );
-
-  const DiagnosticsSection = () => (
-    <div className="space-y-6">
-      <div className="text-center mb-8">
-        <h2 className="text-3xl font-bold mb-2">System Diagnostics</h2>
-        <p className="text-muted-foreground">Vehicle health and maintenance alerts</p>
-      </div>
-
-      <div className="space-y-4">
-        {diagnosticAlerts.map((alert) => (
-          <motion.div
-            key={alert.id}
-            initial={{ opacity: 0, x: -20 }}
-            animate={{ opacity: 1, x: 0 }}
-          >
-            <Card className="bg-card/80 backdrop-blur-sm">
-              <CardContent className="p-6">
-                <div className="flex items-start space-x-4">
-                  <div className="mt-1">
-                    {alert.severity === 'healthy' && (
-                      <CheckCircle className="w-8 h-8 text-green-500" />
-                    )}
-                    {alert.severity === 'warning' && (
-                      <AlertTriangle className="w-8 h-8 text-yellow-500" />
-                    )}
-                    {alert.severity === 'critical' && (
-                      <XCircle className="w-8 h-8 text-red-500" />
-                    )}
-                  </div>
-                  <div className="flex-1">
-                    <div className="text-xl font-bold mb-2">{alert.title}</div>
-                    <div className="text-muted-foreground mb-2">{alert.description}</div>
-                    {alert.value && (
-                      <div className="text-lg">
-                        <span className="font-bold text-primary">{alert.value}</span>
-                        {alert.threshold && (
-                          <span className="text-muted-foreground"> / {alert.threshold}</span>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          </motion.div>
-        ))}
-      </div>
-
-      <div className="space-y-4">
-        <h3 className="text-xl font-bold">Smart Insights</h3>
-        {insights.map((insight, index) => (
-          <Card key={index} className="bg-card/80 backdrop-blur-sm">
-            <CardContent className="p-4">
-              <div className="flex items-start space-x-3">
-                <div className="text-2xl">{insight.icon}</div>
-                <div>
-                  <div className="font-bold text-lg">{insight.title}</div>
-                  <div className="text-muted-foreground">{insight.description}</div>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        ))}
-      </div>
-    </div>
-  );
-
-  const TripSection = () => (
-    <div className="space-y-6">
-      <div className="text-center mb-8">
-        <h2 className="text-3xl font-bold mb-2">Trip Summary</h2>
-        <p className="text-muted-foreground">Current journey statistics and performance</p>
-      </div>
-
-      <div className="grid grid-cols-2 gap-6 mb-8">
-        <Card className="bg-card/80 backdrop-blur-sm">
-          <CardContent className="p-6 text-center">
-            <div className="text-4xl font-bold text-primary mb-2">{tripData.distance}</div>
-            <div className="text-muted-foreground">km traveled</div>
-          </CardContent>
-        </Card>
-        <Card className="bg-card/80 backdrop-blur-sm">
-          <CardContent className="p-6 text-center">
-            <div className="text-4xl font-bold text-blue-500 mb-2">{tripData.averageSpeed}</div>
-            <div className="text-muted-foreground">avg speed km/h</div>
-          </CardContent>
-        </Card>
-        <Card className="bg-card/80 backdrop-blur-sm">
-          <CardContent className="p-6 text-center">
-            <div className="text-4xl font-bold text-orange-500 mb-2">{tripData.maxSpeed}</div>
-            <div className="text-muted-foreground">max speed km/h</div>
-          </CardContent>
-        </Card>
-        <Card className="bg-card/80 backdrop-blur-sm">
-          <CardContent className="p-6 text-center">
-            <div className="text-4xl font-bold text-green-500 mb-2">{tripData.fuelConsumption}</div>
-            <div className="text-muted-foreground">L/100km</div>
-          </CardContent>
-        </Card>
-      </div>
-
-      <Card className="bg-card/80 backdrop-blur-sm">
-        <CardContent className="p-6">
-          <div className="flex justify-between items-center mb-4">
-            <span className="text-xl font-bold">Eco Score</span>
-            <span className="text-2xl font-bold text-green-500">{tripData.ecoScore}/100 🌱</span>
-          </div>
-          <Progress value={tripData.ecoScore} className="h-4" />
-          <div className="text-center mt-4 text-muted-foreground">
-            Great driving! You are saving fuel and reducing emissions.
-          </div>
-        </CardContent>
-      </Card>
-    </div>
-  );
-
-  const renderSection = () => {
-    switch (currentSection) {
-      case 'voice':
-        return <VoiceSection />;
-      case 'telemetry':
-        return <TelemetrySection />;
-      case 'navigation':
-        return <NavigationSection />;
-      case 'diagnostics':
-        return <DiagnosticsSection />;
-      case 'trip':
-        return <TripSection />;
-      default:
-        return <VoiceSection />;
-    }
-  };
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
-      <Card className="bg-card/80 backdrop-blur-sm border-border/50 rounded-none">
-        <CardContent className="p-4">
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            <div className="flex items-center space-x-6">
-              <div className="flex items-center space-x-2">
-                {obdStatus.connected ? (
-                  <CheckCircle className="w-5 h-5 text-green-500" />
-                ) : (
-                  <XCircle className="w-5 h-5 text-red-500" />
-                )}
-                <div className="text-sm">
-                  <div className="font-medium">{obdStatus.dongleName}</div>
-                  <div className="text-muted-foreground">
-                    {obdStatus.pollingRate} • {obdStatus.latency}
-                  </div>
-                </div>
-              </div>
-
-              <Separator orientation="vertical" className="h-8" />
-
-              <div className="flex items-center space-x-2">
-                <MapPin className="w-4 h-4 text-blue-500" />
-                <div className="text-sm">
-                  <div className="font-medium">{gpsStatus.type}</div>
-                  <div className="text-muted-foreground">±{gpsStatus.accuracy}</div>
-                </div>
-              </div>
-
-              <div className="flex items-center space-x-2">
-                {networkStatus.online ? (
-                  <Wifi className="w-4 h-4 text-green-500" />
-                ) : (
-                  <WifiOff className="w-4 h-4 text-red-500" />
-                )}
-                <span className="text-sm font-medium">
-                  {networkStatus.online ? 'Online' : 'Offline'}
-                </span>
-              </div>
-            </div>
-
-            <div className="flex items-center space-x-4 text-sm">
-              <div className="text-center">
-                <div className="font-medium">{carInfo.model}</div>
-                <div className="text-muted-foreground">{carInfo.vin}</div>
-              </div>
-              <Separator orientation="vertical" className="h-8" />
-              <div className="text-center">
-                <div className="font-medium">Trip: {carInfo.duration}</div>
-                <div className="text-muted-foreground">Started {carInfo.tripStart}</div>
-              </div>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      <div className="flex items-center justify-between p-4 bg-card/50">
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => navigateSection('right')}
-          className="flex items-center space-x-2"
-        >
-          <ChevronLeft className="w-4 h-4" />
-          <span>Previous</span>
-        </Button>
-
-        <div className="flex items-center space-x-4">
-          {sections.map((section) => {
-            const Icon = section.icon;
-            return (
-              <Button
-                key={section.key}
-                variant={currentSection === section.key ? "default" : "ghost"}
-                size="sm"
-                onClick={() => setCurrentSection(section.key)}
-                className="flex items-center space-x-2"
-              >
-                <Icon className="w-4 h-4" />
-                <span className="hidden sm:inline">{section.title}</span>
-              </Button>
-            );
-          })}
+    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-blue-950/20 to-slate-950 flex flex-col">
+      {/* Header Controls */}
+      <div className="flex items-center justify-between p-4 border-b border-slate-800/30">
+        <div className="flex items-center space-x-3">
+          <Badge 
+            variant="default"
+            className="bg-blue-600/20 text-blue-300 border-blue-500/30 flex items-center space-x-2"
+          >
+            <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+            <span>Always Listening</span>
+          </Badge>
         </div>
 
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => navigateSection('left')}
-          className="flex items-center space-x-2"
-        >
-          <span>Next</span>
-          <ChevronRight className="w-4 h-4" />
-        </Button>
+        <div className="flex items-center space-x-2">
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => setIsMuted(!isMuted)}
+            className="text-slate-400 hover:text-white h-8 w-8"
+          >
+            {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+          </Button>
+          
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => setShowChat(!showChat)}
+            className="text-slate-400 hover:text-white h-8 w-8"
+          >
+            <MessageCircle className="w-4 h-4" />
+          </Button>
+        </div>
       </div>
 
-      <div className="p-6">
-        <AnimatePresence mode="wait">
-          <motion.div
-            key={currentSection}
-            initial={{ opacity: 0, x: 50 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: -50 }}
-            transition={{ duration: 0.3 }}
-          >
-            {renderSection()}
-          </motion.div>
+      {/* Main Voice Assistant Area */}
+      <div className="flex-1 flex">
+        {/* Voice Assistant Section */}
+        <div className="flex-1 flex flex-col items-center justify-center p-6">
+          {/* Voice State Display */}
+          <div className="mb-6 text-center">
+            <h1 className="text-2xl font-light text-white mb-2">AI Voice Assistant</h1>
+            <Badge 
+              variant="secondary"
+              className="text-sm px-3 py-1 capitalize bg-slate-800/50 text-slate-300 border-slate-700"
+            >
+              {voiceState === 'idle' ? 'Ready to Listen' : 
+               voiceState === 'listening' ? 'Listening...' :
+               voiceState === 'processing' ? 'Processing...' :
+               'Speaking...'}
+            </Badge>
+          </div>
+
+          {/* Voice Orb */}
+          <VoiceOrb />
+
+          {/* Speech to Text Display - Always visible and prominent */}
+          <div className="mt-8 w-full max-w-3xl">
+            {/* Live transcript with enhanced visibility */}
+            <div className="mb-6 p-6 bg-slate-900/60 backdrop-blur-xl rounded-2xl border border-slate-700/50 min-h-[120px] flex flex-col justify-center">
+              <div className="flex items-center space-x-2 mb-4">
+                <div className="flex items-center space-x-2">
+                  <div className={`p-2 rounded-full ${
+                    voiceState === 'listening' ? 'bg-blue-500/20' : 'bg-slate-700/30'
+                  }`}>
+                    <Mic className="w-4 h-4 text-blue-400" />
+                  </div>
+                  <span className="text-sm font-medium text-slate-300">
+                    {voiceState === 'listening' ? 'Listening...' : 'Speech to Text'}
+                  </span>
+                </div>
+                {voiceState === 'listening' && (
+                  <div className="flex-1 ml-4">
+                    <SiriWaveform isActive={true} intensity={0.8} />
+                  </div>
+                )}
+              </div>
+              
+              {(transcript || interimTranscript) ? (
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  className="text-lg text-white leading-relaxed"
+                >
+                  {transcript}
+                  <span className="text-blue-400 animate-pulse font-light">
+                    {interimTranscript}
+                  </span>
+                </motion.div>
+              ) : (
+                <div className="text-slate-400 text-center py-4">
+                  {voiceState === 'listening' 
+                    ? 'Say something...' 
+                    : 'Waiting for your voice...'}
+                </div>
+              )}
+            </div>
+
+            {/* Text Input */}
+            <form onSubmit={handleTextSubmit} className="flex space-x-3">
+              <Input
+                value={textInput}
+                onChange={(e) => setTextInput(e.target.value)}
+                placeholder="Or type your message here..."
+                className="bg-slate-900/50 backdrop-blur-sm border-slate-700/50 text-white placeholder-slate-400 text-base py-3 rounded-xl"
+              />
+              <Button 
+                type="submit" 
+                size="icon" 
+                className="bg-blue-600/80 hover:bg-blue-600 h-12 w-12 rounded-xl backdrop-blur-sm"
+              >
+                <Send className="w-4 h-4" />
+              </Button>
+            </form>
+          </div>
+        </div>
+
+        {/* Chat History Panel */}
+        <AnimatePresence>
+          {showChat && (
+            <motion.div
+              initial={{ x: '100%', opacity: 0 }}
+              animate={{ x: 0, opacity: 1 }}
+              exit={{ x: '100%', opacity: 0 }}
+              transition={{ duration: 0.3, ease: "easeOut" }}
+              className="w-96 border-l border-slate-800/30 bg-slate-900/40 backdrop-blur-xl flex flex-col"
+            >
+              {/* Chat Header */}
+              <div className="p-4 border-b border-slate-800/30">
+                <h2 className="font-medium text-white flex items-center space-x-2">
+                  <MessageCircle className="w-4 h-4" />
+                  <span>Chat History</span>
+                </h2>
+              </div>
+
+              {/* Messages */}
+              <div className="flex-1 p-4 space-y-3 overflow-y-auto">
+                {chatMessages.map((message) => (
+                  <motion.div
+                    key={message.id}
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className={`flex ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}
+                  >
+                    <div className={`max-w-xs p-3 rounded-2xl ${
+                      message.type === 'user'
+                        ? 'bg-blue-600/80 text-white'
+                        : 'bg-slate-800/60 text-white border border-slate-700/50'
+                    }`}>
+                      <p className="text-sm leading-relaxed">{message.text}</p>
+                      <p className="text-xs opacity-60 mt-1">
+                        {message.timestamp.toLocaleTimeString()}
+                      </p>
+                    </div>
+                  </motion.div>
+                ))}
+              </div>
+            </motion.div>
+          )}
         </AnimatePresence>
+      </div>
+
+      {/* Status Bar */}
+      <div className="p-3 border-t border-slate-800/30 bg-slate-900/20 backdrop-blur-sm">
+        <div className="flex items-center justify-between text-xs text-slate-400">
+          <div className="flex items-center space-x-4">
+            <span>Voice Assistant Active</span>
+            <span>Messages: {chatMessages.length}</span>
+          </div>
+          <div className="flex items-center space-x-2">
+            <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+            <span>Always Listening</span>
+          </div>
+        </div>
       </div>
     </div>
   );
-};
+}

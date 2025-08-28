@@ -1,6 +1,6 @@
 "use client";
 
-import { CarCoPilotDashboard } from "@/components/CarCopilotDashboard";
+import CarCoPilotDashboard from "@/components/CarCoPilotDashboard";
 import { Toaster } from "sonner";
 
 export default function Page() {
